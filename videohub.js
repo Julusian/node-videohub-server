@@ -70,16 +70,31 @@ class VideohubServer extends EventEmitter {
 			return
 		}
 
-		const clientId = `${remoteAddress}:${remotePort}`
-		this.#clients[clientId] = socket
+		const internalClientId = `${remoteAddress}:${remotePort}`
+		let publicClientId = remoteAddress
+		this.#clients[internalClientId] = socket
 
-		socket.on('close', () => {
-			this.emit('debug', 'lost client', clientId)
-			delete this.#clients[clientId]
-			this.emit('disconnect', remoteAddress)
+		const doCleanup = () => {
+			socket.removeAllListeners('data')
+			socket.removeAllListeners('close')
+
+			this.emit('debug', 'lost client', internalClientId, publicClientId)
+			delete this.#clients[internalClientId]
+			this.emit('disconnect', publicClientId)
+		}
+
+		socket.setTimeout(20000)
+		socket.on('timeout', () => {
+			this.emit('debug', 'socket timeout', internalClientId, publicClientId)
+			socket.end()
+			doCleanup()
 		})
 
-		this.emit('debug', 'new client', clientId)
+		socket.on('close', doCleanup)
+
+		socket.on('close', () => {})
+
+		this.emit('debug', 'new client', internalClientId, publicClientId)
 
 		let dataBuffer = ''
 		socket.on('data', (data) => {
@@ -91,7 +106,7 @@ class VideohubServer extends EventEmitter {
 				dataBuffer = dataBuffer.slice(splitIndex + 2)
 
 				if (toProcess.length > 0) {
-					this.#handleCommands(socket, remoteAddress, toProcess)
+					this.#handleCommands(socket, publicClientId, toProcess)
 				}
 			}
 		})
@@ -101,9 +116,11 @@ class VideohubServer extends EventEmitter {
 
 		// Make sure the panel is configured as needed
 		this.#runConfigure(remoteAddress)
-			.then(() => {
+			.then((deviceInfo) => {
+				publicClientId = deviceInfo.id || publicClientId
+
 				// It is ready for use
-				this.emit('connect', remoteAddress)
+				this.emit('connect', publicClientId, deviceInfo, remoteAddress)
 			})
 			.catch((err) => {
 				// Something went wrong, kill it
@@ -138,6 +155,7 @@ class VideohubServer extends EventEmitter {
 
 			/** @type {string[]} */
 			let deviceInfo = []
+			// Receive the lines about the device
 			await new Promise((resolve) => {
 				let dataBuffer = ''
 				const handler = (/** @type {Buffer} */ data) => {
@@ -156,10 +174,8 @@ class VideohubServer extends EventEmitter {
 								socket.off('data', handler)
 								resolve(null)
 							}
-							// this.#handleCommands(socket, remoteAddress, toProcess)
 						}
 					}
-					// console.log('config', data, data.toString())
 				}
 				socket.on('data', handler)
 			})

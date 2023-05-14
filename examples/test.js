@@ -10,8 +10,8 @@ server.on('debug', (...args) => {
 server.on('error', (address) => {
 	console.log('error', address)
 })
-server.on('connect', (address) => {
-	console.log('connect', address)
+server.on('connect', (address, info) => {
+	console.log('connect', address, info)
 })
 server.on('disconnect', (address) => {
 	console.log('disconnect', address)
