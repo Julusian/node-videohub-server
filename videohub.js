@@ -136,6 +136,11 @@ class VideohubServer extends EventEmitter {
 	async #runConfigure(remoteAddress) {
 		const socket = net.connect(CONFIGURE_PORT, remoteAddress)
 
+		socket.on('error', (err) => {
+			// 'handle' the error
+			this.emit('debug', 'configure error', remoteAddress, err)
+		})
+
 		const timeout = setTimeout(() => {
 			// Give the configuration a hard timeout, to avoid getting stuck
 			this.emit('debug', 'configure timeout', remoteAddress)
@@ -149,6 +154,7 @@ class VideohubServer extends EventEmitter {
 				new Promise((resolve) => socket.once('connect', resolve)),
 				new Promise((resolve) => socket.once('timeout', resolve)),
 				new Promise((resolve) => socket.once('close', resolve)),
+				new Promise((resolve) => socket.once('error', resolve)),
 			])
 
 			this.emit('debug', 'configure opened', remoteAddress)
@@ -215,7 +221,12 @@ class VideohubServer extends EventEmitter {
 			this.emit('debug', 'configure complete', remoteAddress, processedInfo)
 
 			// Configure the device
-			socket.write(generateConfigure(processedInfo.buttonsTotal))
+			socket.write(
+				generateConfigure(
+					processedInfo.buttonsColumns,
+					processedInfo.buttonsRows,
+				),
+			)
 
 			// Give the socket a chance to flush
 			// TODO - this could be better
