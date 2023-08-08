@@ -25,12 +25,15 @@ class VideohubServer extends EventEmitter {
 	 */
 	#clients = {}
 
+	#manualConfigureClients = false
+
 	#isRunning = false
 
-	constructor() {
+	constructor(options = {}) {
 		super()
 
 		this.#server = net.createServer(this.#clientConnect.bind(this))
+		this.#manualConfigureClients = !!options.manualConfigure
 	}
 
 	/**
@@ -138,13 +141,15 @@ class VideohubServer extends EventEmitter {
 					socket.destroy()
 				})
 
-				// Configure the device
-				configureSocket.write(
-					generateConfigure(
-						processedInfo.buttonsColumns,
-						processedInfo.buttonsRows,
-					),
-				)
+				if (!this.#manualConfigureClients) {
+					// Configure the device
+					configureSocket.write(
+						generateConfigure(
+							processedInfo.buttonsColumns,
+							processedInfo.buttonsRows,
+						),
+					)
+				}
 
 				// It is ready for use
 				this.emit('connect', publicClientId, processedInfo, remoteAddress)
@@ -337,12 +342,13 @@ class VideohubServer extends EventEmitter {
 	}
 
 	/**
-	 * Set the number of destinations for a connected panel
+	 * Configure a connected panel
 	 * @param {string} publicClientId
-	 * @param {number} destinationCount
+	 * @param {object} options
 	 */
-	setDestinationCount(publicClientId, destinationCount) {
-		destinationCount = Math.floor(destinationCount)
+
+	configureDevice(publicClientId, options) {
+		const destinationCount = Math.floor(options.destinationCount)
 		if (
 			typeof destinationCount !== 'number' ||
 			isNaN(destinationCount) ||
