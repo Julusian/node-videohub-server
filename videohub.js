@@ -9,7 +9,7 @@ const CONFIGURE_PORT = 9991
 const CONFIGURE_TIMEOUT = 5000
 
 /**
- * @typedef {{ client: net.Socket, configure: net.Socket | undefined }} SocketWrapper
+ * @typedef {{ client: net.Socket, configure: net.Socket | undefined, deviceInfo: Record<string, any>, publicClientId: string }} SocketWrapper
  */
 
 class VideohubServer extends EventEmitter {
@@ -80,6 +80,8 @@ class VideohubServer extends EventEmitter {
 		const clientWrapper = {
 			client: socket,
 			configure: undefined,
+			deviceInfo: {},
+			publicClientId,
 		}
 		this.#clients[internalClientId] = clientWrapper
 
@@ -127,7 +129,9 @@ class VideohubServer extends EventEmitter {
 		this.#connectConfigure(remoteAddress)
 			.then(([configureSocket, processedInfo]) => {
 				clientWrapper.configure = configureSocket
+				clientWrapper.deviceInfo = processedInfo
 				publicClientId = processedInfo.id || publicClientId
+				clientWrapper.publicClientId = publicClientId
 
 				configureSocket.on('close', () => {
 					// Kill the primary socket
@@ -135,7 +139,7 @@ class VideohubServer extends EventEmitter {
 				})
 
 				// Configure the device
-				socket.write(
+				configureSocket.write(
 					generateConfigure(
 						processedInfo.buttonsColumns,
 						processedInfo.buttonsRows,
@@ -166,8 +170,11 @@ class VideohubServer extends EventEmitter {
 			this.emit('debug', 'configure error', remoteAddress, err)
 		})
 
+		let killed = false
+
 		const timeout = setTimeout(() => {
 			// Give the configuration a hard timeout, to avoid getting stuck
+			killed = true
 			this.emit('debug', 'configure timeout', remoteAddress)
 			socket.destroy()
 			socket.removeAllListeners()
@@ -181,6 +188,8 @@ class VideohubServer extends EventEmitter {
 				new Promise((resolve) => socket.once('close', resolve)),
 				new Promise((resolve) => socket.once('error', resolve)),
 			])
+
+			if (killed) throw new Error('Timeout')
 
 			this.emit('debug', 'configure opened', remoteAddress)
 
@@ -275,10 +284,11 @@ class VideohubServer extends EventEmitter {
 			for (let i = 1; i < lines.length; i++) {
 				const line = lines[i]
 				const parts = line.split(' ')
+				const destination = Number(parts[0])
 				const value = Number(parts[1])
-				if (parts[0] == '0' && !isNaN(value)) {
+				if (!isNaN(destination) && !isNaN(value)) {
 					displayPress = value
-					this.emit('press', remoteAddress, value)
+					this.emit('press', remoteAddress, destination, value)
 				}
 			}
 
@@ -308,7 +318,9 @@ class VideohubServer extends EventEmitter {
 		}
 
 		const client = Object.values(this.#clients).find(
-			(cl) => cl.client.remoteAddress === publicClientId,
+			(cl) =>
+				cl.client.remoteAddress === publicClientId ||
+				cl.publicClientId === publicClientId,
 		)
 		if (!client || !client.client.remoteAddress)
 			throw new Error(`Unknown client: ${publicClientId}`)
@@ -322,6 +334,43 @@ class VideohubServer extends EventEmitter {
 		payload += '\n'
 
 		client.configure.write(payload)
+	}
+
+	/**
+	 * Set the number of destinations for a connected panel
+	 * @param {string} publicClientId
+	 * @param {number} destinationCount
+	 */
+	setDestinationCount(publicClientId, destinationCount) {
+		destinationCount = Math.floor(destinationCount)
+		if (
+			typeof destinationCount !== 'number' ||
+			isNaN(destinationCount) ||
+			destinationCount < 0 ||
+			destinationCount > 8 ||
+			destinationCount % 2 !== 0
+		) {
+			throw new Error(`Invalid destination count: "${destinationCount}"`)
+		}
+
+		const client = Object.values(this.#clients).find(
+			(cl) =>
+				cl.client.remoteAddress === publicClientId ||
+				cl.publicClientId === publicClientId,
+		)
+		if (!client || !client.client.remoteAddress)
+			throw new Error(`Unknown client: ${publicClientId}`)
+
+		if (!client.configure)
+			throw new Error(`Unavailable for configuration: ${publicClientId}`)
+
+		client.configure.write(
+			generateConfigure(
+				client.deviceInfo.buttonsColumns,
+				client.deviceInfo.buttonsRows,
+				destinationCount,
+			),
+		)
 	}
 }
 
