@@ -8,6 +8,10 @@ const { generateConfigure } = require('./lib/configure')
 const CONFIGURE_PORT = 9991
 const CONFIGURE_TIMEOUT = 5000
 
+/**
+ * @typedef {{ client: net.Socket, configure: net.Socket | undefined }} SocketWrapper
+ */
+
 class VideohubServer extends EventEmitter {
 	/**
 	 * Listening server
@@ -17,7 +21,7 @@ class VideohubServer extends EventEmitter {
 
 	/**
 	 * Connected clients
-	 * @type {Record<string, net.Socket>}
+	 * @type {Record<string, SocketWrapper>}
 	 */
 	#clients = {}
 
@@ -27,7 +31,6 @@ class VideohubServer extends EventEmitter {
 		super()
 
 		this.#server = net.createServer(this.#clientConnect.bind(this))
-		//
 	}
 
 	/**
@@ -52,8 +55,9 @@ class VideohubServer extends EventEmitter {
 		this.#server.close()
 
 		// Close all open clients
-		for (const socket of Object.values(this.#clients)) {
-			socket.destroy()
+		for (const client of Object.values(this.#clients)) {
+			client.client.destroy()
+			if (client.configure) client.configure.destroy()
 		}
 
 		this.#server.removeAllListeners()
@@ -72,13 +76,19 @@ class VideohubServer extends EventEmitter {
 
 		const internalClientId = `${remoteAddress}:${remotePort}`
 		let publicClientId = remoteAddress
-		this.#clients[internalClientId] = socket
+		/** @type {SocketWrapper} */
+		const clientWrapper = {
+			client: socket,
+			configure: undefined,
+		}
+		this.#clients[internalClientId] = clientWrapper
 
 		const doCleanup = () => {
 			socket.removeAllListeners('data')
 			socket.removeAllListeners('close')
 
 			this.emit('debug', 'lost client', internalClientId, publicClientId)
+			if (clientWrapper.configure) clientWrapper.configure.destroy()
 			delete this.#clients[internalClientId]
 			this.emit('disconnect', publicClientId)
 		}
@@ -114,15 +124,26 @@ class VideohubServer extends EventEmitter {
 		// Send the prelude
 		socket.write(generatePrelude())
 
-		// Make sure the panel is configured as needed
-		this.#runConfigure(remoteAddress, (deviceInfo) =>
-			generateConfigure(deviceInfo.buttonsColumns, deviceInfo.buttonsRows),
-		)
-			.then((deviceInfo) => {
-				publicClientId = deviceInfo.id || publicClientId
+		this.#connectConfigure(remoteAddress)
+			.then(([configureSocket, processedInfo]) => {
+				clientWrapper.configure = configureSocket
+				publicClientId = processedInfo.id || publicClientId
+
+				configureSocket.on('close', () => {
+					// Kill the primary socket
+					socket.destroy()
+				})
+
+				// Configure the device
+				socket.write(
+					generateConfigure(
+						processedInfo.buttonsColumns,
+						processedInfo.buttonsRows,
+					),
+				)
 
 				// It is ready for use
-				this.emit('connect', publicClientId, deviceInfo, remoteAddress)
+				this.emit('connect', publicClientId, processedInfo, remoteAddress)
 			})
 			.catch((err) => {
 				// Something went wrong, kill it
@@ -134,10 +155,11 @@ class VideohubServer extends EventEmitter {
 
 	/**
 	 * @param {string} remoteAddress
-	 * @param {(deviceInfo) => string} generatePayload
+	 * @returns {Promise<[net.Socket, Record<string, any>]>}
 	 */
-	async #runConfigure(remoteAddress, generatePayload) {
+	async #connectConfigure(remoteAddress) {
 		const socket = net.connect(CONFIGURE_PORT, remoteAddress)
+		socket.setTimeout(20000)
 
 		socket.on('error', (err) => {
 			// 'handle' the error
@@ -192,6 +214,7 @@ class VideohubServer extends EventEmitter {
 			// Parse the deviceInfo
 			this.emit('debug', 'configure info', remoteAddress, deviceInfo)
 
+			/** @type {Record<string, any>} */
 			const processedInfo = {}
 			for (let i = 1; i < deviceInfo.length; i++) {
 				const element = deviceInfo[i]
@@ -223,25 +246,13 @@ class VideohubServer extends EventEmitter {
 
 			this.emit('debug', 'configure ready', remoteAddress, processedInfo)
 
-			// Configure the device
-			socket.write(generatePayload(processedInfo))
-
-			// Give the socket a chance to flush
-			// TODO - this could be better
-			await new Promise((resolve) => setTimeout(resolve, 500))
-
-			// await new Promise((resolve) => {
-			// 	let dataBuffer = ''
-			// 	const handler = (/** @type {Buffer} */ data) => {
-			// 		console.log('recv', data)
-			// 	}
-			// 	socket.on('data', handler)
-			// })
-
-			return processedInfo
-		} finally {
+			return [socket, processedInfo]
+		} catch (e) {
 			socket.destroy()
 			socket.removeAllListeners()
+
+			throw e
+		} finally {
 			clearTimeout(timeout)
 		}
 	}
@@ -285,7 +296,7 @@ class VideohubServer extends EventEmitter {
 	 * @param {string} publicClientId
 	 * @param {number} backlight
 	 */
-	async setBacklight(publicClientId, backlight) {
+	setBacklight(publicClientId, backlight) {
 		backlight = Math.floor(backlight)
 		if (
 			typeof backlight !== 'number' ||
@@ -296,18 +307,21 @@ class VideohubServer extends EventEmitter {
 			throw new Error(`Invalid backlight value: "${backlight}"`)
 		}
 
-		const socket = Object.values(this.#clients).find(
-			(cl) => cl.remoteAddress === publicClientId,
+		const client = Object.values(this.#clients).find(
+			(cl) => cl.client.remoteAddress === publicClientId,
 		)
-		if (!socket || !socket.remoteAddress)
+		if (!client || !client.client.remoteAddress)
 			throw new Error(`Unknown client: ${publicClientId}`)
+
+		if (!client.configure)
+			throw new Error(`Unavailable for configuration: ${publicClientId}`)
 
 		let payload = 'SETTINGS:\n'
 		payload += `Backlight: ${backlight}\n`
 		payload += `Destination backlight: ${backlight}\n`
 		payload += '\n'
 
-		await this.#runConfigure(socket.remoteAddress, () => payload)
+		client.configure.write(payload)
 	}
 }
 
