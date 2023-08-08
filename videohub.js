@@ -115,7 +115,9 @@ class VideohubServer extends EventEmitter {
 		socket.write(generatePrelude())
 
 		// Make sure the panel is configured as needed
-		this.#runConfigure(remoteAddress)
+		this.#runConfigure(remoteAddress, (deviceInfo) =>
+			generateConfigure(deviceInfo.buttonsColumns, deviceInfo.buttonsRows),
+		)
 			.then((deviceInfo) => {
 				publicClientId = deviceInfo.id || publicClientId
 
@@ -132,8 +134,9 @@ class VideohubServer extends EventEmitter {
 
 	/**
 	 * @param {string} remoteAddress
+	 * @param {(deviceInfo) => string} generatePayload
 	 */
-	async #runConfigure(remoteAddress) {
+	async #runConfigure(remoteAddress, generatePayload) {
 		const socket = net.connect(CONFIGURE_PORT, remoteAddress)
 
 		socket.on('error', (err) => {
@@ -218,19 +221,14 @@ class VideohubServer extends EventEmitter {
 				}
 			}
 
-			this.emit('debug', 'configure complete', remoteAddress, processedInfo)
+			this.emit('debug', 'configure ready', remoteAddress, processedInfo)
 
 			// Configure the device
-			socket.write(
-				generateConfigure(
-					processedInfo.buttonsColumns,
-					processedInfo.buttonsRows,
-				),
-			)
+			socket.write(generatePayload(processedInfo))
 
 			// Give the socket a chance to flush
 			// TODO - this could be better
-			await new Promise((resolve) => setTimeout(resolve, 100))
+			await new Promise((resolve) => setTimeout(resolve, 500))
 
 			// await new Promise((resolve) => {
 			// 	let dataBuffer = ''
@@ -280,6 +278,36 @@ class VideohubServer extends EventEmitter {
 		} else {
 			// Unknown command, ignore it
 		}
+	}
+
+	/**
+	 * Set the backlight level of a connected panel
+	 * @param {string} publicClientId
+	 * @param {number} backlight
+	 */
+	async setBacklight(publicClientId, backlight) {
+		backlight = Math.floor(backlight)
+		if (
+			typeof backlight !== 'number' ||
+			isNaN(backlight) ||
+			backlight < 0 ||
+			backlight > 10
+		) {
+			throw new Error(`Invalid backlight value: "${backlight}"`)
+		}
+
+		const socket = Object.values(this.#clients).find(
+			(cl) => cl.remoteAddress === publicClientId,
+		)
+		if (!socket || !socket.remoteAddress)
+			throw new Error(`Unknown client: ${publicClientId}`)
+
+		let payload = 'SETTINGS:\n'
+		payload += `Backlight: ${backlight}\n`
+		payload += `Destination backlight: ${backlight}\n`
+		payload += '\n'
+
+		await this.#runConfigure(socket.remoteAddress, () => payload)
 	}
 }
 
